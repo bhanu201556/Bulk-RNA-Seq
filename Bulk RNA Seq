@@ -1,0 +1,280 @@
+library(DESeq2)
+library(ggplot2)
+library(dplyr)
+
+# Set working directory
+setwd("~/Documents/Fly_Lab/Counts")
+
+# Step 1: Read count data (ensure the Gene_ids and Gene_names are in the correct format)
+data <- read.table('counts.csv', header = TRUE, sep = ",", row.names = 1)
+
+# Check the data (optional)
+head(data)
+
+# Step 2: Subset only count data columns (e.g., select samples with prefix 'W' or 'K')
+count_matrix <- data[, grep("^W|^K", colnames(data))]  # Adjust regex as needed
+
+# Step 3: Load metadata from a CSV file
+sample_info <- read.csv("sample_info.csv", header = TRUE, row.names = 1)
+
+# Check the loaded metadata
+head(sample_info)
+
+# Step 4: Exclude extra colums and ensure the count_matrix columns match the row names of sample_info
+count_matrix <- count_matrix[, colnames(count_matrix) %in% rownames(sample_info)]
+
+# Step 5: Convert 'Genotype' and 'Conditions' columns to factors with specified levels
+sample_info$Genotype <- factor(sample_info$Genotype, levels = c("WT", "KO"))
+sample_info$Conditions <- factor(sample_info$Conditions, levels = c("TR1", "TR2"))
+
+# Step 6: Create DESeq2 dataset
+dds <- DESeqDataSetFromMatrix(
+  countData = count_matrix,
+  colData = sample_info,
+  design = ~ Genotype + Conditions
+)
+
+# Step 7: Run DESeq2 analysis
+dds <- DESeq(dds)  
+
+# Step 8: Extract results from DESeq2
+res <- results(dds)
+
+# Step 9: Add the Gene_name to the results
+# The row names of `res` are the Gene_ids (in Ensembl format), so we can match them with `data`
+res$Gene_name <- data[rownames(res), "Gene_name"]
+
+# Step 10: Convert the results to a data frame for easier manipulation
+res_df <- as.data.frame(res)
+
+# Step 11: Add Gene_id as a column for reference (the rownames are Gene_ids)
+res_df$Gene_id <- rownames(res_df)
+
+# Step 12: View the first few rows of the results with Gene names and Gene ids
+head(res_df)
+
+# Step 13: Save the results to a CSV file (optional)
+write.csv(res_df, "DESeq2_results_with_gene_names_and_ids.csv", row.names = FALSE)
+
+
+res$Gene_name <- data[rownames(res), "Gene_name"]
+
+
+# -- PCA
+
+# Perform PCA on the transformed data
+pca_data <- prcomp(t(assay(vsd)))  # PCA needs samples as rows, genes as columns
+
+# Extract PCA scores and variance explained
+pca_scores <- as.data.frame(pca_data$x)
+pca_var <- (pca_data$sdev^2) / sum(pca_data$sdev^2) * 100  # Variance explained
+
+# Add metadata to PCA scores
+pca_scores$sample <- rownames(pca_scores)
+pca_scores <- merge(pca_scores, sample_info, by.x = "sample", by.y = "row.names")
+
+# 2D PCA Plot
+library(ggplot2)
+
+ggplot(pca_scores, aes(x = PC1, y = PC2, color = Genotype, shape = Conditions)) +
+  geom_point(size = 4, alpha = 0.8) +
+  labs(
+    title = "2D PCA Plot",
+    x = paste0("PC1 (", round(pca_var[1], 2), "% variance)"),
+    y = paste0("PC2 (", round(pca_var[2], 2), "% variance)")
+  ) +
+  theme_minimal() +
+  theme(legend.position = "right")
+
+# 3D PCA Plot
+library(plotly)
+
+plot_ly(
+  data = pca_scores,
+  x = ~PC1,
+  y = ~PC2,
+  z = ~PC3,
+  color = ~Genotype,
+  symbol = ~Conditions,
+  text = ~sample,
+  type = "scatter3d",
+  mode = "markers",
+  marker = list(size = 5, opacity = 0.8)
+) %>%
+  layout(
+    title = "3D PCA Plot",
+    scene = list(
+      xaxis = list(title = paste0("PC1 (", round(pca_var[1], 2), "% variance)")),
+      yaxis = list(title = paste0("PC2 (", round(pca_var[2], 2), "% variance)")),
+      zaxis = list(title = paste0("PC3 (", round(pca_var[3], 2), "% variance)"))
+    )
+  )
+
+
+
+
+# MA - with gene names 
+
+# Load required libraries
+library(ggplot2)
+library(ggrepel)  # For better text labeling
+
+# Convert DESeq2 results to a data frame
+res_df <- as.data.frame(res)
+
+# Add a column to indicate significant genes (padj < 0.05 & |log2FoldChange| > 1)
+res_df$significant <- res_df$padj < 0.05 & abs(res_df$log2FoldChange) > 1
+
+# Add Gene_name column to the results (assuming Gene_name is already in res_df from previous steps)
+res_df$Gene_name <- data[rownames(res_df), "Gene_name"]
+
+# Generate the MA plot
+ggplot(res_df, aes(x = baseMean, y = log2FoldChange)) +
+  geom_point(aes(color = significant), alpha = 0.5, size = 1) +  # Points colored based on significance
+  scale_x_log10() +  # Log scale for the x-axis
+  scale_color_manual(values = c("grey", "red")) +  # Custom colors for significant and non-significant points
+  labs(
+    title = "MA Plot",
+    x = "Mean Expression (log scale)",
+    y = "Log2 Fold Change"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "top") +
+  
+  # Add text labels for significant genes
+  geom_text_repel(
+    aes(label = ifelse(significant, Gene_name, "")),  # Only label significant genes
+    box.padding = 0.35,  # Adjust padding around text labels
+    point.padding = 0.5,  # Adjust distance between points and labels
+    max.overlaps = 10,  # Limit the number of overlapping labels
+    min.segment.length = 0,  # Allow labels to connect with points
+    segment.color = "grey",  # Color of the lines connecting labels to points
+    size = 3  # Adjust the font size for labels
+  )
+
+
+
+## heatmap 
+library(RColorBrewer)
+library(pheatmap)
+
+# Step 1: Extract normalized counts
+normalized_counts <- counts(dds, normalized = TRUE)
+
+# Step 2: Subset for significant genes
+sig_genes <- rownames(DEGs)  # Assuming DEGs contains the significant genes (list of row names)
+norm_counts_sig <- normalized_counts[sig_genes, ]
+
+# Ensure row names are gene names (if DEGs contains gene names)
+rownames(norm_counts_sig) <- data[sig_genes, "Gene_name"]
+
+# Step 3: Prepare metadata for annotation
+meta <- data.frame(
+  Genotype = sample_info$Genotype,
+  Condition = sample_info$Conditions,
+  row.names = rownames(sample_info)
+)
+
+# Step 4: Define heatmap colors
+heat_colors <- colorRampPalette(rev(brewer.pal(9, "RdYlBu")))(255)
+
+# Step 5: Create the heatmap
+pheatmap(
+  norm_counts_sig, 
+  color = heat_colors, 
+  cluster_rows = TRUE, 
+  cluster_cols = TRUE, 
+  show_rownames = TRUE,  # Show gene names on the rows
+  show_colnames = TRUE,  # Show sample names on the columns
+  annotation_col = meta,  # Sample metadata for column annotation
+  border_color = NA,  # No border color
+  fontsize = 1,  # Font size for labels
+  scale = "row",  # Normalize each row (gene) for better visualization
+  main = "Heatmap of Significant Genes"  # Title of the heatmap
+)
+
+
+# top 100
+library(RColorBrewer)
+library(pheatmap)
+
+# Step 1: Extract normalized counts
+normalized_counts <- counts(dds, normalized = TRUE)
+
+# Step 2: Convert DESeq2 results to a data frame
+res_df <- as.data.frame(res)
+
+# Step 3: Add a column to indicate significance (padj < 0.05 & |log2FoldChange| > 1)
+res_df$significant <- res_df$padj < 0.05 & abs(res_df$log2FoldChange) > 1
+
+# Step 4: Order genes by adjusted p-value (padj) and absolute log2 fold change
+# Sort by padj (ascending) and log2FoldChange (descending for greater fold changes)
+res_df_sorted <- res_df[order(res_df$padj, abs(res_df$log2FoldChange), decreasing = c(FALSE, TRUE)), ]
+
+# Step 5: Select top 10 significant genes (based on lowest padj and highest fold change)
+top_100_genes <- rownames(res_df_sorted)[1:100]
+
+# Step 6: Subset the normalized counts for top 100 genes
+norm_counts_top100 <- normalized_counts[top_100_genes, ]
+
+# Ensure row names in norm_counts_top100 are gene names
+norm_counts_top100 <- norm_counts_top100[rownames(norm_counts_top100) %in% top_100_genes, ]
+rownames(norm_counts_top100) <- data[top_100_genes, "Gene_name"]
+
+# Step 7: Prepare metadata for annotation
+meta <- data.frame(
+  Genotype = sample_info$Genotype,
+  Condition = sample_info$Conditions,
+  row.names = rownames(sample_info)
+)
+
+# Step 8: Define heatmap colors
+heat_colors <- colorRampPalette(rev(brewer.pal(9, "RdYlBu")))(255)
+
+# Step 9: Create the heatmap for top 100 significant genes
+pheatmap(
+  norm_counts_top100, 
+  color = heat_colors, 
+  cluster_rows = TRUE, 
+  cluster_cols = TRUE, 
+  show_rownames = TRUE,  # Show gene names on the rows
+  show_colnames = TRUE,  # Show sample names on the columns
+  annotation_col = meta,  # Sample metadata for column annotation
+  border_color = NA,  # No border color
+  fontsize = 3,  # Font size for labels
+  scale = "row",  # Normalize each row (gene) for better visualization
+  main = "Heatmap of Top 100 Significant Genes"  # Title of the heatmap
+)
+
+
+
+# Volcano plot 
+
+
+# Assuming `res` contains the DESeq2 results
+# Convert DESeq2 results to a data frame
+res_df <- as.data.frame(res)
+
+# Add a column to classify genes as up-regulated, down-regulated, or non-significant
+res_df$regulation <- "Non-significant"  # Default to non-significant
+res_df$regulation[res_df$padj < 0.05 & res_df$log2FoldChange > 1] <- "Up-regulated"
+res_df$regulation[res_df$padj < 0.05 & res_df$log2FoldChange < -1] <- "Down-regulated"
+
+# Volcano plot: log2FoldChange vs -log10(padj)
+ggplot(res_df, aes(x = log2FoldChange, y = -log10(padj), color = regulation)) +
+  geom_point(alpha = 0.6, size = 1.5) +  # Plot points with transparency and size
+  scale_color_manual(values = c("Up-regulated" = "red", "Down-regulated" = "green", "Non-significant" = "gray")) +  # Colors for the points
+  theme_minimal() +
+  labs(
+    title = "Volcano Plot of DEGs",
+    x = "Log2 Fold Change",
+    y = "-Log10 Adjusted P-Value"
+  ) +
+  theme(
+    legend.title = element_blank(),
+    legend.position = "top",
+    plot.title = element_text(hjust = 0.5)
+  ) +
+  # Add threshold lines for significance (e.g., log2FC > 1 or < -1, padj < 0.05)
+  geom_hline(yintercept = -log10(0.05), linetype = "dashed", color = "black", size = 0.7) +  # Adjusted p-value threshold
+  geom_vline(xintercept = c(-1, 1), linetype = "dashed", color = "black", size = 0.7)  # Log2 Fold Change threshold
